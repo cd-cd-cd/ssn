@@ -2,7 +2,7 @@ from comet_ml import Experiment
 import json
 import multiprocessing
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,3"
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path

@@ -2,7 +2,7 @@ from comet_ml import Experiment
 import json
 import multiprocessing
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,4"
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +17,7 @@ from tqdm import tqdm
 import models
 
 from data_utils import data_path, out_path, FashionIQDataset
-from utils import collate_fn, update_train_running_results, generate_randomized_fiq_caption, set_train_bar_description, save_model, device
+from utils import collate_fn, update_train_running_results, set_train_bar_description, save_model, device
 from validate import compute_fiq_val_metrics
 import utils
 import test
@@ -263,6 +263,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--n_heads", default=2, type=int
     )
+    parser.add_argument("--dataset_list_path", default="/amax/home/chendian/DQU-CIR-main/dataset_list.pkl", type=str, help="")
 
     args = parser.parse_args()
     
@@ -288,7 +289,8 @@ if __name__ == '__main__':
     "embed_size": args.embed_size,
     "mu": args.mu,
     "n_layers": args.n_layers,
-    "n_heads": args.n_heads
+    "n_heads": args.n_heads,
+    "dataset_list_path": args.dataset_list_path
 }
 
     if args.api_key and args.workspace:
@@ -311,7 +313,7 @@ if __name__ == '__main__':
     experiment.log_code(folder=str(out_path / 'code'))
     experiment.log_parameters(args)
     
-    dataset_list_path = "/amax/home/chendian/DQU-CIR-main/dataset_list.pkl"
+    dataset_list_path = args.dataset_list_path
     # 检查文件是否存在
     if os.path.exists(dataset_list_path):
         # 读取 dataset_list
