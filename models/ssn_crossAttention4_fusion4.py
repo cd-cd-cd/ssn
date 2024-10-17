@@ -4,15 +4,17 @@ import torch.nn.functional as F
 
 from transformers import CLIPTokenizer, CLIPTextModelWithProjection
 from transformers import CLIPProcessor, CLIPVisionModelWithProjection
-from model import Router, SelfAttentionCell
+from model import SelfAttentionCell
 from utils import _get_clones
 from collections import OrderedDict
 import math
-
+from models.EfficientAdditiveAttnetion import EfficientAdditiveAttnetion
+from models.ExternalAttention import ExternalAttention
 
 # concat2crossAttention
 
 clip_path = "/amax/home/chendian/huggingface/clip-32"
+# clip_path = "/amax/home/chendian/.cache/clip/ViT-H-14/laionCLIP-ViT-H-14-laion2B-s32B-b79K"
 class Model(nn.Module):
     """
     Combiner module which once trained fuses textual and visual information
@@ -46,8 +48,14 @@ class Model(nn.Module):
         self.token_type_text = 1
 
         # The Layer for degradation, to produce L+, I_r^0
-        self.text_token_selection_mask = nn.Sequential(nn.Linear(self.width, 1), nn.Sigmoid())
-        self.image_token_selection_mask = nn.Sequential(nn.Linear(self.width, 1), nn.Sigmoid())
+        self.text_token_selection_mask = nn.Sequential(nn.Linear(self.width * 3, self.width),
+                                                       nn.ReLU(),
+                                                       nn.Linear(self.width, 1),
+                                                       nn.Sigmoid())
+        self.image_token_selection_mask = nn.Sequential(nn.Linear(self.width * 3, self.width),
+                                                        nn.ReLU(),
+                                                        nn.Linear(self.width, 1),
+                                                        nn.Sigmoid())
         
         self.image_token_proj_layer = nn.Linear(self.clip_img_feature_dim, self.width)
 
@@ -55,16 +63,29 @@ class Model(nn.Module):
         self.fusion_layer = nn.TransformerEncoder(encoder_layer, num_layers=1)
 
         self.combiner_layer = nn.Linear(self.projection_dim * 2, self.hidden_dim)
-        self.output_layer = nn.Linear(self.hidden_dim, self.clip_feature_dim)
-        self.dynamic_scalar = nn.Sequential(nn.Linear(self.projection_dim * 2, self.hidden_dim), nn.ReLU(),
-                                            nn.Linear(self.hidden_dim, 1), nn.Sigmoid())
-
+        self.output_layer = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim * 2),
+                                          nn.Softplus(),
+                                          nn.Dropout(0.5),
+                                          nn.Linear(self.hidden_dim * 2, self.clip_feature_dim),
+                                          nn.Softplus(),
+                                          nn.Dropout(0.5),
+                                          )
+        self.dynamic_scalar = nn.Sequential(nn.Linear(self.projection_dim * 2, self.hidden_dim),
+                                            nn.Softplus(),
+                                            nn.Linear(self.hidden_dim, self.hidden_dim),
+                                            nn.Softplus(),
+                                            nn.Linear(self.hidden_dim, self.hidden_dim),
+                                            nn.Softplus(),
+                                            nn.Linear(self.hidden_dim, 1), nn.Sigmoid()
+                                            )
         self.logit_scale = 100
         self.loss = nn.CrossEntropyLoss()
         # cd edit combiner
         self.crossAttention = CrossAttention(self.clip_feature_dim, args.n_layers, args.n_heads, None)
         self.sa = SelfAttentionCell(args)
-
+        self.Efficient = EfficientAdditiveAttnetion(in_dims=self.width, token_dim=512)
+        self.External = ExternalAttention(d_model=self.width)
+        
     def forward(self, reference_images: torch.tensor, text_inputs: torch.tensor,
                 target_images: torch.tensor, ground_truth: torch.tensor) -> torch.tensor:
         reference_inputs = reference_images.squeeze()
@@ -142,15 +163,25 @@ class Model(nn.Module):
     # raw
     def combine_features(self, reference_embeds, text_embeds, reference_features, text_features, text_mask= None) -> torch.tensor:
         cls_ref_embeds = reference_features[:, 0]
+    
+        cls_ref_embeds_sa = self.sa(cls_ref_embeds.unsqueeze(0)).squeeze(0)
         if text_features is not None:
             cls_text_embeds = self.pool_text(text_features, text_mask)
-
+            
             raw_combined_features = torch.cat((cls_text_embeds, cls_ref_embeds), -1)
             combined_features = F.relu(self.combiner_layer(raw_combined_features))
             dynamic_scalar = self.dynamic_scalar(raw_combined_features)
             output = 0.01 * self.output_layer(combined_features) + dynamic_scalar * text_embeds + (
                 1 - dynamic_scalar) * reference_embeds
-
+            
+            
+            cls_text_embeds_sa = self.sa(cls_text_embeds.unsqueeze(0)).squeeze(0)
+            raw_combined_features_sa = torch.cat((cls_ref_embeds_sa, cls_text_embeds_sa), -1)
+            combined_features_sa = F.relu(self.combiner_layer(raw_combined_features_sa))
+            dynamic_scalar = self.dynamic_scalar(combined_features_sa)
+            output_sa = 0.01 * self.output_layer(combined_features_sa) + dynamic_scalar * text_embeds + (
+                1 - dynamic_scalar) * reference_embeds
+            output = 0.8 * output + 0.2 * output_sa
         else:
             output = 0.01 * cls_ref_embeds + reference_embeds
 
@@ -171,8 +202,10 @@ class Model(nn.Module):
             cross_feat = self.crossAttention(local_x, global_img)
             sa_feat = self.sa(cross_feat)
             cross_feat = self.crossAttention(sa_feat, cross_feat)
+            fusion_feat = torch.cat([cross_feat, local_x, global_img], dim=-1)
             
-            selection_mask = self.text_token_selection_mask(cross_feat)
+            
+            selection_mask = self.text_token_selection_mask(fusion_feat)
 
             positive_text_features = text_features * selection_mask.expand_as(text_features)
             negative_text_features = text_features * (1 - selection_mask).expand_as(text_features)
@@ -186,7 +219,8 @@ class Model(nn.Module):
             sa_feat = self.sa(cross_feat)
             cross_feat = self.crossAttention(sa_feat, cross_feat)
             
-            selection_mask = self.image_token_selection_mask(cross_feat)
+            fusion_feat = torch.cat([cross_feat, local_x, global_x], dim=-1)
+            selection_mask = self.image_token_selection_mask(fusion_feat)
         
 
             positive_image_features = image_projected_features * selection_mask.expand_as(image_projected_features)
@@ -197,7 +231,7 @@ class Model(nn.Module):
                 positive_image_features, positive_text_features, text_mask)
             negative_image_features, negative_text_features = self.token_type_embedding(
                 negative_image_features, negative_text_features, text_mask)
-
+            
             ##### fusion decomposed reference image features and text features by fusion layer ######
             co_features = torch.cat((positive_image_features, positive_text_features), dim=1)
             # The input for nn.Transformers is size of (seq_len, bs,  dim)
@@ -216,16 +250,25 @@ class Model(nn.Module):
             image_projected_features = self.image_token_proj_layer(image_features)
             image_projected_features= self.token_type_embedding(
                 image_projected_features, None, None)
-
+            
             co_features = image_projected_features
             # The input for nn.Transformers is size of (seq_len, bs, dim)
             co_features = co_features.permute(1, 0, 2)
-
             fused_features = self.fusion_layer(co_features)
             fused_features = fused_features.permute(1, 0, 2)
 
             return fused_features
-
+    
+    
+    def extract_query(self, textual_query, visual_query):
+        textual_query = F.normalize(self.extract_text_fea(textual_query), p=2, dim=-1)
+        visual_query = F.normalize(self.extract_img_fea(visual_query), p=2, dim=-1)
+        
+        combined_feature = self.combiner_fc(torch.cat([textual_query, visual_query], dim=-1))
+        dynamic_scaler = self.scaler_fc(self.dropout(combined_feature))
+        query = dynamic_scaler * textual_query + (1 - dynamic_scaler) * visual_query
+        return F.normalize(query, p=2, dim=-1)
+    
 class CrossAttention(nn.Module):
     def __init__(self, clip_feature_dim, n_layers, n_heads, attn_mask=None):
         super(CrossAttention, self).__init__()

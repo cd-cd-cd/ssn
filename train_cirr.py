@@ -2,7 +2,7 @@ from comet_ml import Experiment
 import json
 import multiprocessing
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
@@ -169,13 +169,13 @@ def combiner_training_cirr(args):
                 if args.save_training:
                     if args.save_best and results_dict['arithmetic_mean'] > best_arithmetic:
                         best_arithmetic = results_dict['arithmetic_mean']
-                        save_model('combiner_arithmetic', epoch, model, training_path)
+                        # save_model('combiner_arithmetic', epoch, model, training_path)
                     if args.save_best and results_dict['harmonic_mean'] > best_harmonic:
                         best_harmonic = results_dict['harmonic_mean']
-                        save_model('combiner_harmonic', epoch, model, training_path)
+                        # save_model('combiner_harmonic', epoch, model, training_path)
                     if args.save_best and results_dict['geometric_mean'] > best_geometric:
                         best_geometric = results_dict['geometric_mean']
-                        save_model('combiner_geometric', epoch, model, training_path)
+                        # save_model('combiner_geometric', epoch, model, training_path)
                     if args.save_best and results_dict['mean(R@5+R_s@1)'] > best_avg_recall:
                         best_json_path = os.path.join(training_path, "metrics_best.json")
                         utils.save_dict_to_json(results_dict, best_json_path)

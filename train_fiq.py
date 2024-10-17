@@ -2,7 +2,7 @@ from comet_ml import Experiment
 import json
 import multiprocessing
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1, 5"
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +19,7 @@ from data_utils import data_path, out_path, FashionIQDataset
 from utils import collate_fn, update_train_running_results, generate_randomized_fiq_caption, set_train_bar_description, save_model, device
 from validate import compute_fiq_val_metrics
 import utils
+import pandas as pd
 
 
 def combiner_training_fiq(args):
@@ -81,11 +82,6 @@ def combiner_training_fiq(args):
     optimizer = optim.AdamW([{'params': head_params},
                             {'params': fusion_params, 'lr': args.lr * args.lr_ratio * 4},
                             {'params': modality_params, 'lr': args.lr * args.lr_ratio * 4},
-                            {'params': proj_params, 'lr': args.lr * args.lr_ratio * 2},
-                            # {'params': co_params, 'lr': args.lr_co},
-                            # {'params': sa_params, 'lr': args.lr_sa},
-                            # {'params': ext_params, 'lr': args.lr_exter},
-                            # {'params': crossAttention_params, 'lr': args.lr},
                             {'params': filter(lambda p: p.requires_grad, clip_params), 'lr': args.lr * args.lr_ratio, 'betas': (0.9, 0.999), 'eps': 1e-4}
                             ], lr=args.lr)
 
@@ -95,6 +91,10 @@ def combiner_training_fiq(args):
     # When save_best == True initialize the best results to zero
     if args.save_best:
         best_avg_recall = 0
+    
+    # Define dataframes for CSV logging
+    training_log_frame = pd.DataFrame()
+    validation_log_frame = pd.DataFrame()
 
     # Start with the training loop
     print('Training loop started')
@@ -164,6 +164,12 @@ def combiner_training_fiq(args):
                 })
 
                 print(json.dumps(results_dict, indent=4))
+                
+                log_dict = {'epoch': epoch}
+                log_dict.update(results_dict)
+                validation_log_frame = pd.concat([validation_log_frame, pd.DataFrame(data=log_dict, index=[0])])
+                validation_log_frame.to_csv(str(training_path / 'validation_metrics.csv'), index=False)
+                
                 experiment.log_metrics(
                     results_dict,
                     epoch=epoch

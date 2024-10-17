@@ -4,16 +4,10 @@ import torch.nn.functional as F
 
 from transformers import CLIPTokenizer, CLIPTextModelWithProjection
 from transformers import CLIPProcessor, CLIPVisionModelWithProjection
-from model import SelfAttentionCell
-from utils import _get_clones
-from collections import OrderedDict
-import math
-
-
-# concat2crossAttention
+from model import SelfAttentionCell, Router
 
 clip_path = "/amax/home/chendian/huggingface/clip-32"
-# clip_path = "/amax/home/chendian/.cache/clip/ViT-H-14/laionCLIP-ViT-H-14-laion2B-s32B-b79K"
+# clip_path = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
 class Model(nn.Module):
     """
     Combiner module which once trained fuses textual and visual information
@@ -47,35 +41,35 @@ class Model(nn.Module):
         self.token_type_text = 1
 
         # The Layer for degradation, to produce L+, I_r^0
-        self.text_token_selection_mask = nn.Sequential(nn.Linear(self.width * 3, self.width),
-                                                       nn.ReLU(),
-                                                       nn.Linear(self.width, 1),
-                                                       nn.Sigmoid())
-        self.image_token_selection_mask = nn.Sequential(nn.Linear(self.width * 3, self.width),
-                                                        nn.ReLU(),
-                                                        nn.Linear(self.width, 1),
-                                                        nn.Sigmoid())
-        
+        self.text_token_selection_mask = nn.Sequential(nn.Linear(self.width * 2, 1), nn.Sigmoid())
+        self.image_token_selection_mask = nn.Sequential(nn.Linear(self.width * 2, 1), nn.Sigmoid())
+
         self.image_token_proj_layer = nn.Linear(self.clip_img_feature_dim, self.width)
 
         encoder_layer = nn.TransformerEncoderLayer(d_model=self.width, nhead=8)
         self.fusion_layer = nn.TransformerEncoder(encoder_layer, num_layers=1)
 
         self.combiner_layer = nn.Linear(self.projection_dim * 2, self.hidden_dim)
+        
         self.output_layer = nn.Linear(self.hidden_dim, self.clip_feature_dim)
         self.dynamic_scalar = nn.Sequential(nn.Linear(self.projection_dim * 2, self.hidden_dim),
-                                            nn.Softplus(),
-                                            nn.Linear(self.hidden_dim, self.hidden_dim),
-                                            nn.Softplus(),
-                                            nn.Linear(self.hidden_dim, self.hidden_dim),
-                                            nn.Softplus(),
-                                            nn.Linear(self.hidden_dim, 1), nn.Sigmoid()
+                                            nn.ReLU(),
+                                            nn.Linear(self.hidden_dim, 1),
+                                            nn.Sigmoid())
+        
+        self.dynamic_vector = nn.Sequential(nn.Linear(self.projection_dim * 2, self.hidden_dim),
+                                            nn.ReLU(),
+                                            nn.Linear(self.hidden_dim, self.clip_feature_dim),
+                                            nn.Sigmoid()
                                             )
+        self.vector_norm = nn.LayerNorm(self.clip_feature_dim)
+        self.self_attn = SelfAttentionCell(args)
+        self.q_weight_layer = Router(3, self.projection_dim, self.projection_dim)
+        self.alpha = nn.Sequential(nn.Linear(self.clip_feature_dim, self.clip_feature_dim), )
+        self.beta = nn.Sequential(nn.Linear(self.clip_feature_dim, self.clip_feature_dim), )
+        
         self.logit_scale = 100
         self.loss = nn.CrossEntropyLoss()
-        # cd edit combiner
-        self.crossAttention = CrossAttention(self.clip_feature_dim, args.n_layers, args.n_heads, None)
-        self.sa = SelfAttentionCell(args)
 
     def forward(self, reference_images: torch.tensor, text_inputs: torch.tensor,
                 target_images: torch.tensor, ground_truth: torch.tensor) -> torch.tensor:
@@ -138,46 +132,48 @@ class Model(nn.Module):
 
     def token_type_embedding(self, ref_features, text_features, text_mask):
         temp = torch.ones(ref_features.shape[0], ref_features.shape[1], dtype=torch.long, device=ref_features.device)
-        # 函数创建一个与 temp 形状相同的张量 ref_type_embedding，其所有元素都被填充为 self.token_type_ref 的值
-        ref_type_embedding = torch.full_like(temp, self.token_type_ref) # 0
+        ref_type_embedding = torch.full_like(temp, self.token_type_ref)
         ref_type_embedding = self.token_type_embeddings(ref_type_embedding)
         ref_embeddings = ref_features + ref_type_embedding
 
         if text_features is not None:
-            text_type_embedding = torch.full_like(text_mask, self.token_type_text) # 1
+            text_type_embedding = torch.full_like(text_mask, self.token_type_text)
             text_type_embedding = self.token_type_embeddings(text_type_embedding.long())
             text_embeddings = text_features + text_type_embedding
             return ref_embeddings, text_embeddings
         else:
             return ref_embeddings
-    
-    # raw
+
     def combine_features(self, reference_embeds, text_embeds, reference_features, text_features, text_mask= None) -> torch.tensor:
         cls_ref_embeds = reference_features[:, 0]
-    
-        cls_ref_embeds_sa = self.sa(cls_ref_embeds.unsqueeze(0)).squeeze(0)
         if text_features is not None:
             cls_text_embeds = self.pool_text(text_features, text_mask)
-            
+
             raw_combined_features = torch.cat((cls_text_embeds, cls_ref_embeds), -1)
             combined_features = F.relu(self.combiner_layer(raw_combined_features))
+            
             dynamic_scalar = self.dynamic_scalar(raw_combined_features)
-            output = 0.01 * self.output_layer(combined_features) + dynamic_scalar * text_embeds + (
-                1 - dynamic_scalar) * reference_embeds
+            dynamic_vector = self.dynamic_vector(raw_combined_features)
+            dynamic_vector = F.normalize(dynamic_vector, dim=-1)
             
+            q_weights = self.q_weight_layer(raw_combined_features) 
             
-            cls_text_embeds_sa = self.sa(cls_text_embeds.unsqueeze(0)).squeeze(0)
-            raw_combined_features_sa = torch.cat((cls_ref_embeds_sa, cls_text_embeds_sa), -1)
-            combined_features_sa = F.relu(self.combiner_layer(raw_combined_features_sa))
-            dynamic_scalar = self.dynamic_scalar(combined_features_sa)
-            output_sa = 0.01 * self.output_layer(combined_features_sa) + dynamic_scalar * text_embeds + (
-                1 - dynamic_scalar) * reference_embeds
-            output = 0.8 * output + 0.2 * output_sa
+            cat_feats = self.output_layer(combined_features)
+            alpha = self.alpha(cat_feats)
+            beta = self.beta(cat_feats)
+            mod_imgfeats = alpha * reference_embeds + beta
+            self_attn_feats = self.self_attn(cat_feats.unsqueeze(0)).squeeze(0)
+            
+            mu = 0.2
+            
+            output = q_weights[:, 0].unsqueeze(-1) * mod_imgfeats + \
+                    q_weights[:, 1].unsqueeze(-1) * self_attn_feats + \
+                        q_weights[:, 2].unsqueeze(-1) * ((dynamic_scalar + mu * dynamic_vector) * text_embeds + \
+                                            (1 - (dynamic_scalar + mu * dynamic_vector)) * reference_embeds)
         else:
             output = 0.01 * cls_ref_embeds + reference_embeds
 
         return F.normalize(output, dim=-1)
-
 
     def encode_features(self, image_features: torch.tensor, text_outputs, text_mask) -> torch.tensor:
         if text_outputs is not None:
@@ -189,14 +185,8 @@ class Model(nn.Module):
             ##### Decompose text instructions ###########
             B, N, C = text_features.size()
             local_x = text_features
-            global_img = global_img.expand(B, N, C)
-            cross_feat = self.crossAttention(local_x, global_img)
-            sa_feat = self.sa(cross_feat)
-            cross_feat = self.crossAttention(sa_feat, cross_feat)
-            fusion_feat = torch.cat([cross_feat, local_x, global_img], dim=-1)
-            
-            
-            selection_mask = self.text_token_selection_mask(fusion_feat)
+            expand_features = torch.cat([local_x, global_img.expand(B, N, C)], dim=-1)
+            selection_mask = self.text_token_selection_mask(expand_features)
 
             positive_text_features = text_features * selection_mask.expand_as(text_features)
             negative_text_features = text_features * (1 - selection_mask).expand_as(text_features)
@@ -205,14 +195,8 @@ class Model(nn.Module):
             global_x = self.pool_text(negative_text_features, text_mask).unsqueeze(1)
             B, N, C = image_projected_features.size()
             local_x = image_projected_features
-            global_x = global_x.expand(B, N, C)
-            cross_feat = self.crossAttention(local_x, global_x)
-            sa_feat = self.sa(cross_feat)
-            cross_feat = self.crossAttention(sa_feat, cross_feat)
-            
-            fusion_feat = torch.cat([cross_feat, local_x, global_x], dim=-1)
-            selection_mask = self.image_token_selection_mask(fusion_feat)
-        
+            expand_features = torch.cat([local_x, global_x.expand(B, N, C)], dim=-1)
+            selection_mask = self.image_token_selection_mask(expand_features)
 
             positive_image_features = image_projected_features * selection_mask.expand_as(image_projected_features)
             negative_image_features = image_projected_features * (1 - selection_mask).expand_as(image_projected_features)
@@ -250,71 +234,3 @@ class Model(nn.Module):
             fused_features = fused_features.permute(1, 0, 2)
 
             return fused_features
-    
-    
-    def extract_query(self, textual_query, visual_query):
-        textual_query = F.normalize(self.extract_text_fea(textual_query), p=2, dim=-1)
-        visual_query = F.normalize(self.extract_img_fea(visual_query), p=2, dim=-1)
-        
-        combined_feature = self.combiner_fc(torch.cat([textual_query, visual_query], dim=-1))
-        dynamic_scaler = self.scaler_fc(self.dropout(combined_feature))
-        query = dynamic_scaler * textual_query + (1 - dynamic_scaler) * visual_query
-        return F.normalize(query, p=2, dim=-1)
-    
-class CrossAttention(nn.Module):
-    def __init__(self, clip_feature_dim, n_layers, n_heads, attn_mask=None):
-        super(CrossAttention, self).__init__()
-        self.n_layers = n_layers
-        self.resblocks = _get_clones(ResidualCrossAttentionBlock(clip_feature_dim, n_heads, attn_mask), n_layers)
-
-    def forward(self, x, y):
-        for i in range(self.n_layers):
-            x = self.resblocks[i](x, y)
-        return x
-    
-class ResidualCrossAttentionBlock(nn.Module):
-    def __init__(self, d_model, n_head, attn_mask=None):
-        super(ResidualCrossAttentionBlock, self).__init__()
-
-        self.attn = CrossAttentionLayer(d_model, n_head)
-        self.ln_x1 = nn.LayerNorm(d_model)
-        self.ln_y1 = nn.LayerNorm(d_model)
-        self.mlp_ratio = 4
-        self.mlp = nn.Sequential(OrderedDict([
-            ("c_fc", nn.Linear(d_model, int(d_model * self.mlp_ratio))),
-            ("gelu", QuickGELU()),
-            ("c_proj", nn.Linear(int(d_model * self.mlp_ratio), d_model))
-        ]))
-        self.ln_2 = nn.LayerNorm(d_model)
-        self.attn_mask = attn_mask
-
-    def attention(self, x, y):
-        return self.attn(x, y)
-        
-    def forward(self, x, y):
-        x = x + self.attention(self.ln_x1(x), self.ln_y1(y))
-        x = x + self.mlp(self.ln_2(x))
-        return x
-    
-class CrossAttentionLayer(nn.Module):
-    def __init__(self, d_model, n_head):
-        super(CrossAttentionLayer, self).__init__()
-        self.h = n_head
-        self.d_model = d_model
-        self.d_k = d_model // n_head
-        self.projections = _get_clones(nn.Linear(d_model, d_model), 3)
-
-    def forward(self, x, y):
-        nbatches = x.size(0)
-        query, key, value = [l(v).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
-                            for l, v in zip(self.projections, (y, x, x))]
-        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.d_k)
-        p_attn = F.softmax(scores, dim=-1)
-        x = torch.matmul(p_attn, value)
-        x = x.transpose(1, 2).contiguous().view(nbatches, -1, self.h * self.d_k)
-        return x
-    
-class QuickGELU(nn.Module):
-    def forward(self, x: torch.Tensor):
-        return x * torch.sigmoid(1.702 * x)
-    

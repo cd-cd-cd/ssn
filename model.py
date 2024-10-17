@@ -39,6 +39,25 @@ class SelfAttentionCell(nn.Module):
         self_att_emb = self.dropout(self.att_layer(self.norm1(local_emb), mask=mask))
         out = self_att_emb + self.dropout(self.feed_forward_layer(self.norm2(self_att_emb)))
         return out
+    
+class SelfAttentionCell2(nn.Module):
+    def __init__(self, args):
+        super(SelfAttentionCell2, self).__init__()
+        self.h = 8
+        self.drop=0.0
+        self.mlp_ratio = 4
+        mlp_hidden_dim = int(args.embed_size * 2 * self.mlp_ratio)
+        self.att_layer = AttentionLayer(args.embed_size * 2, self.h, drop=self.drop)
+        self.feed_forward_layer = FeedForward(args.embed_size * 2, mlp_hidden_dim, drop=self.drop)
+        self.dropout = nn.Dropout(self.drop)
+        self.norm1 = nn.LayerNorm(args.embed_size * 2)
+        self.norm2 = nn.LayerNorm(args.embed_size * 2)
+
+    def forward(self, local_emb):
+        mask=None 
+        self_att_emb = self.dropout(self.att_layer(self.norm1(local_emb), mask=mask))
+        out = self_att_emb + self.dropout(self.feed_forward_layer(self.norm2(self_att_emb)))
+        return out
 
 class AttentionLayer(nn.Module):
     def __init__(self, embed_size, h, is_share=False, drop=0.0):
