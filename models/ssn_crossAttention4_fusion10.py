@@ -177,12 +177,12 @@ class Model(nn.Module):
             cat_feats = self.output_layer(combined_features)
             alpha = self.alpha(cat_feats)
             beta = self.beta(cat_feats)
-            # mod_imgfeats = alpha * reference_embeds + beta
-            self_attn_feats = self.self_attn(cat_feats.unsqueeze(0)).squeeze(0)
+            mod_imgfeats = alpha * reference_embeds + beta
+            # self_attn_feats = self.self_attn(cat_feats.unsqueeze(0)).squeeze(0)
             
-            mu = 0.3
+            mu = 0.2
             
-            output = q_weights[:, 0].unsqueeze(-1) * self_attn_feats + \
+            output = q_weights[:, 0].unsqueeze(-1) * mod_imgfeats + \
                         q_weights[:, 1].unsqueeze(-1) * ((dynamic_scalar + mu * dynamic_vector) * text_embeds + \
                                             (1 - (dynamic_scalar + mu * dynamic_vector)) * reference_embeds)
         else:

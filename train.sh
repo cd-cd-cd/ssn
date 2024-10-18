@@ -43,7 +43,7 @@
 
 python train_cirr.py \
   --dataset 'cirr' \
-  --model 'ssn_fusion10' \
+  --model 'ssn_crossAttention4_fusion12' \
   --projection_dim 512 \
   --hidden_dim 512 \
   --num_epochs 50 \

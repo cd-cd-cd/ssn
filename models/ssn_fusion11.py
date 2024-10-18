@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from transformers import CLIPTokenizer, CLIPTextModelWithProjection
 from transformers import CLIPProcessor, CLIPVisionModelWithProjection
-from model import SelfAttentionCell, Router
+from model import SelfAttentionCell, Router, CrossAttention
 
 clip_path = "/amax/home/chendian/huggingface/clip-32"
 # clip_path = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
@@ -64,10 +64,11 @@ class Model(nn.Module):
                                             )
         self.vector_norm = nn.LayerNorm(self.clip_feature_dim)
         self.self_attn = SelfAttentionCell(args)
-        self.q_weight_layer = Router(2, self.projection_dim, self.projection_dim)
+        self.q_weight_layer = Router(3, self.projection_dim, self.projection_dim)
         self.alpha = nn.Sequential(nn.Linear(self.clip_feature_dim, self.clip_feature_dim), )
         self.beta = nn.Sequential(nn.Linear(self.clip_feature_dim, self.clip_feature_dim), )
         
+        self.crossAttention = CrossAttention(self.clip_feature_dim, args.n_layers, args.n_heads, None)
         self.logit_scale = 100
         self.loss = nn.CrossEntropyLoss()
 
@@ -162,13 +163,15 @@ class Model(nn.Module):
             alpha = self.alpha(cat_feats)
             beta = self.beta(cat_feats)
             mod_imgfeats = alpha * reference_embeds + beta
+            cross = self.crossAttention(cls_text_embeds.unsqueeze(0), cls_ref_embeds.unsqueeze(0)).squeeze(0)
             # self_attn_feats = self.self_attn(cat_feats.unsqueeze(0)).squeeze(0)
             
             mu = 0.2
             
             output = q_weights[:, 0].unsqueeze(-1) * mod_imgfeats + \
                         q_weights[:, 1].unsqueeze(-1) * ((dynamic_scalar + mu * dynamic_vector) * text_embeds + \
-                                            (1 - (dynamic_scalar + mu * dynamic_vector)) * reference_embeds)
+                                            (1 - (dynamic_scalar + mu * dynamic_vector)) * reference_embeds) + \
+                                                q_weights[:, 2].unsqueeze(-1) * cross
         else:
             output = 0.01 * cls_ref_embeds + reference_embeds
 
