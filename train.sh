@@ -24,7 +24,7 @@
 
 # python train_fiq.py \
 #   --dataset 'fashion_iq' \
-#   --model 'ssn_fusion9' \
+#   --model 'ssn_raw' \
 #   --projection_dim 512 \
 #   --hidden_dim 512 \
 #   --num_epochs 50 \
@@ -43,7 +43,7 @@
 
 python train_cirr.py \
   --dataset 'cirr' \
-  --model 'ssn_crossAttention4_fusion12' \
+  --model 'ssn_crossAttention4_fusion11' \
   --projection_dim 512 \
   --hidden_dim 512 \
   --num_epochs 50 \

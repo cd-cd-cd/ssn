@@ -82,8 +82,10 @@ class Model(nn.Module):
         self.vector_norm = nn.LayerNorm(self.clip_feature_dim)
         self.self_attn = SelfAttentionCell(args)
         self.q_weight_layer = Router(3, self.projection_dim, self.projection_dim)
-        self.alpha = nn.Sequential(nn.Linear(self.clip_feature_dim, self.clip_feature_dim), )
-        self.beta = nn.Sequential(nn.Linear(self.clip_feature_dim, self.clip_feature_dim), )
+        self.alpha = nn.Sequential(nn.Linear(self.clip_feature_dim, self.clip_feature_dim), nn.ReLU(), nn.Dropout(0.5))
+        self.beta = nn.Sequential(nn.Linear(self.clip_feature_dim, self.clip_feature_dim), nn.ReLU(), nn.Dropout(0.5))
+        self.lin = nn.Sequential(nn.Linear(self.clip_feature_dim, self.clip_feature_dim), nn.ReLU(), nn.Dropout(0.5))
+        # self.lin2 = nn.Sequential(nn.Linear(self.clip_feature_dim, self.clip_feature_dim), nn.ReLU(), nn.Dropout(0.5))
         
     def forward(self, reference_images: torch.tensor, text_inputs: torch.tensor,
                 target_images: torch.tensor, ground_truth: torch.tensor) -> torch.tensor:
@@ -178,8 +180,9 @@ class Model(nn.Module):
             alpha = self.alpha(cat_feats)
             beta = self.beta(cat_feats)
             mod_imgfeats = alpha * reference_embeds + beta
-            cross = self.crossAttention(cls_text_embeds.unsqueeze(0), cls_ref_embeds.unsqueeze(0)).squeeze(0)
-            
+            # mod_imgfeats = self.lin2(mod_imgfeats)
+            cross = self.crossAttention(cls_ref_embeds.unsqueeze(0), cls_text_embeds.unsqueeze(0)).squeeze(0)
+            cross = self.lin(cross)
             # self_attn_feats = self.self_attn(cat_feats.unsqueeze(0)).squeeze(0)
             
             mu = 0.2

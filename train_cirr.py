@@ -2,7 +2,7 @@ from comet_ml import Experiment
 import json
 import multiprocessing
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,5"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,3"
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
@@ -72,8 +72,8 @@ def combiner_training_cirr(args):
                             {'params': modality_params, 'lr': args.lr * args.lr_ratio * 4},
                             {'params': proj_params, 'lr': args.lr * args.lr_ratio * 2},
                             {'params': clip_params, 'lr': args.lr * args.lr_ratio},
-                            {'params': co_params, 'lr': args.lr_co},
-                            {'params': sa_params, 'lr': args.lr_sa},
+                            # {'params': co_params, 'lr': args.lr_co},
+                            # {'params': sa_params, 'lr': args.lr_sa},
                             ], lr=args.lr)
 
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
